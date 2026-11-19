@@ -2,214 +2,153 @@ package com.luminate.keyboard
 
 import android.animation.ValueAnimator
 import android.content.Context
-import android.graphics.*
+import android.content.SharedPreferences
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
-import android.view.animation.DecelerateInterpolator
-import kotlin.math.min
+import android.view.animation.OvershootInterpolator
 
-enum class KeyboardTheme { DARK, LIGHT, LIQUID }
-
-class KeyboardView(context: Context, private val listener: Listener) : View(context) {
+class KeyboardView(context: Context, private val listener: Listener) : View(context), SharedPreferences.OnSharedPreferenceChangeListener {
     interface Listener {
         fun onText(text: String)
         fun onDelete()
         fun onEnter()
         fun onClipboard()
         fun onSettings()
-        fun onPicker()
+        fun onEmoji()
         fun onShare()
-        fun onSelectAll()
-        fun onCut()
-        fun onCopy()
-        fun onPaste()
+        fun onTextEdit(action: Int)
+        fun onTranslate()
+        fun onVoice()
+        fun onGif()
     }
-
-    enum class Shift { OFF, ON, CAPS }
-    private data class Slot(val key: Key, val rect: RectF, val row: Int)
-    private val d = resources.displayMetrics.density
-    private val toolbarH = 48f*d
-    private var rowH = 52f*d
-    private val gap = 4f*d
-    private val pad = 4f*d
-    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign=Paint.Align.CENTER }
-    private var theme = KeyboardTheme.DARK
-    private var layer = Layer.LETTERS
-    private var shift = Shift.OFF
-    private var slots: List<Slot> = emptyList()
-    private var pressed: Slot? = null
-    private var toolbarPressed = -1
-    private var toolPressed = -1
-    private var toolbox = false
-    private var editingTools = false
-    private var oneHanded = false
-    private var compact = false
-    private var popupKey: String? = null
-    private var popupRect = RectF()
-    private var popupProgress = 0f
-    private var popupAnimator: ValueAnimator? = null
-    private var lastShiftTap = 0L
-    private val handler = Handler(Looper.getMainLooper())
-    private val repeat = object: Runnable { override fun run(){ listener.onDelete(); handler.postDelayed(this,48) } }
-
-    private data class Palette(val bg:Int,val key:Int,val special:Int,val action:Int,val ink:Int,val muted:Int,val stroke:Int)
-    private fun palette(): Palette = when(theme) {
-        KeyboardTheme.LIGHT -> Palette(Color.rgb(238,240,245),Color.WHITE,Color.rgb(218,222,231),Color.rgb(173,202,250),Color.rgb(30,34,42),Color.rgb(95,103,116),Color.rgb(255,255,255))
-        KeyboardTheme.DARK -> Palette(Color.rgb(29,30,32),Color.rgb(55,56,59),Color.rgb(66,67,70),Color.rgb(169,199,255),Color.rgb(238,239,243),Color.rgb(174,177,184),Color.rgb(91,93,98))
-        KeyboardTheme.LIQUID -> Palette(Color.rgb(24,27,35),Color.argb(145,105,119,145),Color.argb(165,129,145,173),Color.rgb(169,203,255),Color.rgb(249,250,255),Color.rgb(207,216,232),Color.argb(175,230,239,255))
+    private enum class Shift { OFF, ON, CAPS }
+    private data class Slot(val key: Key, val rect: RectF)
+    private val prefs=context.getSharedPreferences("keyboard_prefs",Context.MODE_PRIVATE)
+    private val d=resources.displayMetrics.density
+    private val toolbarH=46*d
+    private var rowH=54*d
+    private val gap=4*d
+    private val pad=4*d
+    private val paint=Paint(Paint.ANTI_ALIAS_FLAG)
+    private val text=Paint(Paint.ANTI_ALIAS_FLAG).apply{textAlign=Paint.Align.CENTER}
+    private var theme=prefs.getString("theme_mode","DARK")?:"DARK"
+    private var glass=prefs.getBoolean("liquid_glass",false)
+    private var bg=Color.DKGRAY; private var keyColor=Color.GRAY; private var special=Color.GRAY
+    private var pressedColor=Color.GRAY; private var accent=Color.BLUE; private var ink=Color.WHITE
+    private var layer=Layer.LETTERS; private var shift=Shift.OFF
+    private var toolbox=false; private var oneHanded=false; private var resized=false
+    private var slots= emptyList<Slot>(); private var toolbar= emptyList<Slot>(); private var tools= emptyList<Slot>()
+    private var pressed:Slot?=null; private var lastShift=0L
+    private var popup:Slot?=null; private var popupLabel=""; private var popupScale=0f
+    private var animator:ValueAnimator?=null
+    private val handler=Handler(Looper.getMainLooper())
+    private val repeat=object:Runnable{override fun run(){listener.onDelete();handler.postDelayed(this,45)}}
+    init{prefs.registerOnSharedPreferenceChangeListener(this);updateColors()}
+    override fun onSharedPreferenceChanged(p:SharedPreferences?,k:String?){theme=prefs.getString("theme_mode","DARK")?:"DARK";glass=prefs.getBoolean("liquid_glass",false);updateColors();invalidate()}
+    private fun updateColors(){
+        val light=theme=="LIGHT"
+        bg=if(light)Color.rgb(238,240,245) else Color.rgb(29,30,32)
+        keyColor=if(light)Color.WHITE else Color.rgb(55,56,59)
+        special=if(light)Color.rgb(218,222,231) else Color.rgb(66,67,70)
+        pressedColor=if(light)Color.rgb(220,230,246) else Color.rgb(85,88,95)
+        accent=if(glass)Color.rgb(0,122,255) else if(light)Color.rgb(173,202,250) else Color.rgb(169,199,255)
+        ink=if(light)Color.rgb(30,34,42) else Color.rgb(238,239,243)
     }
-
-    init { isHapticFeedbackEnabled=true; setLayerType(View.LAYER_TYPE_SOFTWARE,null) }
-    fun applyPreferences() {
-        val prefs=context.getSharedPreferences("luminate_prefs",Context.MODE_PRIVATE)
-        theme=runCatching { KeyboardTheme.valueOf(prefs.getString("theme","DARK") ?: "DARK") }.getOrDefault(KeyboardTheme.DARK)
-        invalidate()
-    }
-    override fun onMeasure(w:Int,h:Int) {
-        val rows=if(toolbox) 3 else Layouts.rows(layer).size
-        val wanted=toolbarH+rows*rowH+pad*2
-        setMeasuredDimension(MeasureSpec.getSize(w),resolveSize(wanted.toInt(),h))
-    }
-    override fun onSizeChanged(w:Int,h:Int,ow:Int,oh:Int){ buildSlots() }
+    override fun onMeasure(w:Int,h:Int){val body=if(toolbox)3*rowH*1.5f else 4*rowH;setMeasuredDimension(MeasureSpec.getSize(w),(toolbarH+body+2*pad).toInt())}
+    override fun onSizeChanged(w:Int,h:Int,ow:Int,oh:Int){buildSlots()}
     private fun buildSlots(){
-        val out=ArrayList<Slot>()
-        val rows=Layouts.rows(layer)
-        val usable=((width-2*pad)*(if(oneHanded)0.78f else 1f)).coerceAtLeast(1f)
-        val startX=if(oneHanded) width-usable-pad else pad
-        rows.forEachIndexed { ri,row ->
-            val total=row.sumOf{it.weight.toDouble()}.toFloat()
-            val widthUnit=usable/total
-            val top=toolbarH+pad+ri*rowH
-            var x=startX
-            row.forEach { key ->
-                val kw=widthUnit*key.weight
-                if(key.type!=KeyType.SPACER) out.add(Slot(key,RectF(x+gap/2,top+gap/2,x+kw-gap/2,top+rowH-gap/2),ri))
-                x+=kw
-            }
+        val usable=(width-2*pad)*(if(oneHanded).78f else 1f)
+        val start=if(oneHanded)width-pad-usable else pad
+        toolbar=listOf(KeyType.GRID_4,KeyType.STICKER,KeyType.CLIPBOARD,KeyType.TRANSLATE,KeyType.SETTINGS,KeyType.THEME,KeyType.VOICE).mapIndexed{i,t->
+            val u=width/7f;Slot(Key("",t),RectF(i*u+gap/2,gap/2,(i+1)*u-gap/2,toolbarH-gap/2))
         }
-        slots=out
-        invalidate()
+        val out=ArrayList<Slot>();val top=toolbarH+pad
+        Layouts.rows(layer).forEachIndexed{r,row->
+            val total=row.sumOf{it.weight.toDouble()}.toFloat();val unit=usable/total;var x=start
+            row.forEach{k->val kw=unit*k.weight;if(k.type!=KeyType.SPACER)out.add(Slot(k,RectF(x+gap/2,top+r*rowH+gap/2,x+kw-gap/2,top+(r+1)*rowH-gap/2)));x+=kw}
+        };slots=out
+        val names=listOf("GIF","Emoji","One-handed","Text editing","Share","Resize")
+        val types=listOf(KeyType.TOOL_GIF,KeyType.TOOL_EMOJI,KeyType.TOOL_ONE_HANDED,KeyType.TOOL_TEXT_EDIT,KeyType.TOOL_SHARE,KeyType.TOOL_RESIZE)
+        val cw=usable/2;val rh=rowH*1.5f
+        tools=types.mapIndexed{i,t->val c=i%2;val r=i/2;Slot(Key(names[i],t),RectF(start+c*cw+gap,top+r*rh+gap,start+(c+1)*cw-gap,top+(r+1)*rh-gap))}
     }
-    fun reset(){ layer=Layer.LETTERS;shift=Shift.OFF;toolbox=false;editingTools=false;buildSlots();requestLayout();applyPreferences() }
-    fun setAutoShift(on:Boolean){ if(shift==Shift.CAPS)return; shift=if(on)Shift.ON else Shift.OFF;invalidate() }
-    private fun label(k:Key)=when(k.type){
+    fun reset(){toolbox=false;layer=Layer.LETTERS;shift=Shift.OFF;buildSlots();requestLayout();invalidate()}
+    fun setAutoShift(on:Boolean){if(shift==Shift.CAPS)return;shift=if(on)Shift.ON else Shift.OFF;invalidate()}
+    private fun label(k:Key):String?=when(k.type){
         KeyType.CHAR->if(layer==Layer.LETTERS&&shift!=Shift.OFF)k.label.uppercase() else k.label
-        KeyType.SHIFT->if(shift==Shift.CAPS)"⬆" else "⇧"
-        KeyType.DEL->"⌫";KeyType.ENTER->"➜";KeyType.MODE_SYM->"?123";KeyType.MODE_ABC->"ABC";KeyType.EMOJI->"☻";else->""
+        KeyType.SHIFT->"⇧";KeyType.DEL->"⌫";KeyType.ENTER->"➜";KeyType.MODE_SYM->"?123";KeyType.MODE_ABC->"ABC";else->null
     }
-    private fun rounded(c:Canvas,r:RectF,color:Int,rad:Float,stroke:Int?=null){
-        p.color=color;p.style=Paint.Style.FILL
-        if(theme==KeyboardTheme.LIQUID){p.shader=LinearGradient(r.left,r.top,r.right,r.bottom,Color.argb(190,255,255,255),color,Shader.TileMode.CLAMP)}
-        c.drawRoundRect(r,rad,rad,p);p.shader=null
-        if(theme==KeyboardTheme.LIQUID){p.color=stroke?:palette().stroke;p.style=Paint.Style.STROKE;p.strokeWidth=1f*d;c.drawRoundRect(r,rad,rad,p);p.style=Paint.Style.FILL
-            p.color=Color.argb(48,255,255,255);c.drawRoundRect(RectF(r.left+2*d,r.top+1*d,r.right-2*d,r.top+min(9*d,r.height()/3)),rad,rad,p)}
+    private fun rounded(c:Canvas,r:RectF,color:Int,rad:Float){
+        paint.color=color
+        if(glass){paint.setShadowLayer(7*d,0f,2*d,Color.argb(55,0,0,0));c.drawRoundRect(r,rad,rad,paint);paint.clearShadowLayer();paint.style=Paint.Style.STROKE;paint.strokeWidth=d;paint.color=Color.argb(95,255,255,255);c.drawRoundRect(r,rad,rad,paint);paint.style=Paint.Style.FILL}
+        else c.drawRoundRect(r,rad,rad,paint)
     }
-    private fun drawText(c:Canvas,s:String,x:Float,y:Float,size:Float,color:Int){
-        tp.color=color;tp.textSize=size*d;tp.typeface=Typeface.create("sans-serif",Typeface.NORMAL)
-        c.drawText(s,x,y-(tp.ascent()+tp.descent())/2,tp)
+    private fun drawLabel(c:Canvas,s:String,x:Float,y:Float,size:Float,color:Int=ink){
+        text.color=color;text.textSize=size*d
+        c.drawText(s,x,y-(text.ascent()+text.descent())/2,text)
     }
     override fun onDraw(c:Canvas){
-        val pal=palette();c.drawColor(pal.bg)
-        if(theme==KeyboardTheme.LIQUID){p.shader=LinearGradient(0f,0f,width.toFloat(),height.toFloat(),Color.rgb(48,57,78),pal.bg,Shader.TileMode.CLAMP);c.drawRect(0f,0f,width.toFloat(),height.toFloat(),p);p.shader=null}
-        drawToolbar(c)
-        if(toolbox) drawToolbox(c) else {
-            slots.forEach { s ->
-                val k=s.key;val isDown=s===pressed
-                val color=when{isDown->if(theme==KeyboardTheme.DARK)Color.rgb(85,88,95) else Color.rgb(220,230,246);k.type==KeyType.ENTER->pal.action;k.type.special->pal.special;else->pal.key}
-                rounded(c,s.rect,color,if(k.type==KeyType.MODE_SYM||k.type==KeyType.ENTER)22*d else 8*d)
-                val text=label(k)
-                if(text.isNotEmpty()) drawText(c,text,s.rect.centerX(),s.rect.centerY(),when(k.type){KeyType.MODE_SYM,KeyType.MODE_ABC->14f;KeyType.SHIFT,KeyType.DEL,KeyType.ENTER->23f;else->23f}*1f,pal.ink)
-                if(layer==Layer.LETTERS&&s.row==0&&k.type==KeyType.CHAR){
-                    val n="qwertyuiop".indexOf(k.label.lowercase()).let{if(it<0)"" else if(it==9)"0" else (it+1).toString()}
-                    tp.textAlign=Paint.Align.RIGHT;tp.textSize=10*d;tp.color=pal.muted;c.drawText(n,s.rect.right-5*d,s.rect.top+13*d,tp);tp.textAlign=Paint.Align.CENTER
-                }
-                if(k.type==KeyType.SPACE)drawText(c,"English",s.rect.centerX(),s.rect.centerY(),15f,pal.muted)
-            }
+        c.drawColor(bg);toolbar.forEachIndexed{i,s->
+            if(i==0&&toolbox)rounded(c,s.rect,accent,20*d)
+            val glyph=listOf("▦","☻","▤","文","⚙","◉","●")[i]
+            drawLabel(c,glyph,s.rect.centerX(),s.rect.centerY(),if(i==0)25f else 23f,if(i==0&&toolbox)Color.WHITE else ink)
         }
-        if(popupKey!=null) drawPopup(c,pal)
-    }
-    private fun drawToolbar(c:Canvas){
-        val pal=palette()
-        val icons=listOf("▦","☻","▤","文","⚙","◉","●")
-        val cell=width/7f
-        icons.forEachIndexed{i,s->
-            val cx=cell*(i+.5f)
-            if(i==toolbarPressed)rounded(c,RectF(cx-20*d,5*d,cx+20*d,toolbarH-4*d),pal.special,22*d)
-            drawText(c,s,cx,toolbarH/2,if(i==0)27f else 25f,if(i==6)pal.action else pal.ink)
+        if(toolbox){tools.forEach{s->rounded(c,s.rect,special,s.rect.height()/2);drawLabel(c,s.key.label,s.rect.centerX(),s.rect.centerY(),15f)}}
+        else slots.forEach{s->
+            val k=s.key;val color=when{pressed===s->pressedColor;k.type==KeyType.ENTER->accent;k.type.special->special;else->keyColor}
+            rounded(c,s.rect,color,if(k.type==KeyType.ENTER||k.type==KeyType.MODE_SYM)22*d else 8*d)
+            label(k)?.let{drawLabel(c,it,s.rect.centerX(),s.rect.centerY(),if(k.type==KeyType.MODE_SYM)14f else 23f,if(k.type==KeyType.ENTER)Color.WHITE else ink)}
+            if(layer==Layer.LETTERS&&s.key.type==KeyType.CHAR&&s.rect.top<toolbarH+rowH){val n="qwertyuiop".indexOf(k.label).let{if(it<0)"" else if(it==9)"0" else (it+1).toString()};text.textSize=10*d;text.color=ink;text.textAlign=Paint.Align.RIGHT;c.drawText(n,s.rect.right-5*d,s.rect.top+13*d,text);text.textAlign=Paint.Align.CENTER}
         }
+        drawPopup(c)
     }
-    private fun drawToolbox(c:Canvas){
-        val pal=palette();val names=if(editingTools) listOf("Select all","Cut","Copy","Paste","◀ Left","Right ▶") else listOf("GIF","Emoji","One-handed","Text editing","Share Luminate","Resize")
-        val icons=if(editingTools) listOf("▣","✂","▢","▤","◀","▶") else listOf("GIF","☺","▣","↔","↗","⤢")
-        val left=8*d;val colGap=8*d;val cellW=(width-2*left-colGap)/2f;val cellH=55*d
-        names.forEachIndexed{i,name->
-            val col=i%2;val row=i/2;val x=left+col*(cellW+colGap);val y=toolbarH+18*d+row*(cellH+10*d)
-            val r=RectF(x,y,x+cellW,y+cellH)
-            rounded(c,r,if(i==toolPressed)pal.action else pal.special,cellH/2)
-            drawText(c,icons[i],x+31*d,y+cellH/2,if(icons[i].length>2)14f else 23f,pal.ink)
-            tp.textAlign=Paint.Align.LEFT;tp.textSize=14*d;tp.color=pal.ink
-            c.drawText(name,x+58*d,y+cellH/2-(tp.ascent()+tp.descent())/2,tp);tp.textAlign=Paint.Align.CENTER
-        }
-        if(editingTools)drawText(c,"‹ Back",width/2f,height-10*d,12f,pal.muted)
-        else {drawText(c,"●   ●",width/2f,height-10*d,10f,pal.muted)}
+    private fun drawPopup(c:Canvas){
+        val s=popup?:return;if(popupScale<=0f)return
+        val w=s.rect.width()*1.4f;val h=s.rect.height()*1.5f;val x=s.rect.centerX();val y=s.rect.top-h/2+6*d
+        c.save();c.scale(popupScale,popupScale,x,s.rect.bottom)
+        val r=RectF(x-w/2,y-h/2,x+w/2,y+h/2);rounded(c,r,if(theme=="LIGHT")Color.WHITE else Color.rgb(78,80,84),10*d)
+        drawLabel(c,popupLabel,x,y,28f);c.restore()
     }
-    private fun drawPopup(c:Canvas,pal:Palette){
-        val progress=popupProgress
-        val alpha=(if(progress<.22f)progress/.22f else (1f-progress)/.78f).coerceIn(0f,1f)
-        val scale=.76f+.24f*(1f-kotlin.math.abs(.28f-progress))
-        val r=RectF(popupRect);val cx=r.centerX();val bottom=r.top-3*d
-        val pw=maxOf(42*d,r.width()*.76f);val ph=54*d
-        val pop=RectF(cx-pw/2,bottom-ph,cx+pw/2,bottom)
-        c.save();c.scale(scale,scale,cx,pop.centerY())
-        p.alpha=(alpha*255).toInt();rounded(c,pop,if(theme==KeyboardTheme.DARK)Color.rgb(83,85,90) else Color.WHITE,12*d)
-        drawText(c,popupKey?: "",cx,pop.centerY(),30f,pal.ink);p.alpha=255;c.restore()
-    }
-    private fun hit(x:Float,y:Float)=slots.firstOrNull{x>=it.rect.left-gap&&x<=it.rect.right+gap&&y>=it.rect.top-gap&&y<=it.rect.bottom+gap}
-    private fun animatePopup(s:Slot){
-        popupAnimator?.cancel();popupKey=label(s.key);popupRect=RectF(s.rect);popupProgress=0f
-        popupAnimator=ValueAnimator.ofFloat(0f,1f).apply{duration=430;interpolator=DecelerateInterpolator();addUpdateListener{popupProgress=it.animatedValue as Float;invalidate()};start()}
+    private fun showPopup(s:Slot){popup=s;popupLabel=label(s.key)?:s.key.label;animator?.cancel();animator=ValueAnimator.ofFloat(0f,1f).apply{duration=145;interpolator=OvershootInterpolator(1.1f);addUpdateListener{popupScale=it.animatedValue as Float;invalidate()};start()}}
+    private fun hidePopup(){animator?.cancel();animator=ValueAnimator.ofFloat(popupScale,0f).apply{duration=95;addUpdateListener{popupScale=it.animatedValue as Float;if(popupScale<=0f)popup=null;invalidate()};start()}}
+    private fun hit(x:Float,y:Float):Slot?=toolbar.firstOrNull{it.rect.contains(x,y)}?:if(toolbox)tools.firstOrNull{it.rect.contains(x,y)} else slots.firstOrNull{x>=it.rect.left-gap/2&&x<=it.rect.right+gap/2&&y>=it.rect.top-gap/2&&y<=it.rect.bottom+gap/2}
+    override fun onTouchEvent(e:MotionEvent):Boolean{
+        when(e.actionMasked){
+            MotionEvent.ACTION_DOWN->{pressed=hit(e.x,e.y);pressed?.let{performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);if(it.key.type==KeyType.CHAR)showPopup(it);if(it.key.type==KeyType.DEL){listener.onDelete();handler.postDelayed(repeat,400)}};invalidate()}
+            MotionEvent.ACTION_MOVE->{val next=hit(e.x,e.y);if(next!==pressed){handler.removeCallbacks(repeat);pressed=next;if(next?.key?.type==KeyType.CHAR)showPopup(next)else hidePopup();invalidate()}}
+            MotionEvent.ACTION_UP->{handler.removeCallbacks(repeat);hidePopup();val item=pressed;pressed=null;invalidate();if(item!=null&&item.key.type!=KeyType.DEL)fire(item.key)}
+            MotionEvent.ACTION_CANCEL->{handler.removeCallbacks(repeat);hidePopup();pressed=null;invalidate()}
+        };return true
     }
     private fun fire(k:Key){
         when(k.type){
-            KeyType.CHAR->{val v=if(layer==Layer.LETTERS&&shift!=Shift.OFF)k.label.uppercase() else k.label;if(layer==Layer.LETTERS&&shift==Shift.ON)shift=Shift.OFF;listener.onText(v)}
-            KeyType.SPACE->listener.onText(" ");KeyType.EMOJI->listener.onText("😊");KeyType.ENTER->listener.onEnter()
-            KeyType.SHIFT->{val now=SystemClock.uptimeMillis();shift=when{shift==Shift.CAPS->Shift.OFF;shift==Shift.ON&&now-lastShiftTap<360->Shift.CAPS;shift==Shift.ON->Shift.OFF;else->Shift.ON};lastShiftTap=now}
-            KeyType.MODE_SYM->{layer=Layer.SYMBOLS;buildSlots()};KeyType.MODE_ABC->{layer=Layer.LETTERS;buildSlots()};else->Unit
-        };invalidate()
+            KeyType.GRID_4->{toolbox=!toolbox;requestLayout();invalidate()}
+            KeyType.STICKER,KeyType.TOOL_EMOJI->listener.onEmoji()
+            KeyType.CLIPBOARD->listener.onClipboard()
+            KeyType.TRANSLATE->listener.onTranslate()
+            KeyType.SETTINGS,KeyType.THEME->listener.onSettings()
+            KeyType.VOICE->listener.onVoice()
+            KeyType.TOOL_GIF->listener.onGif()
+            KeyType.TOOL_ONE_HANDED->{oneHanded=!oneHanded;buildSlots();invalidate()}
+            KeyType.TOOL_TEXT_EDIT->listener.onTextEdit(android.R.id.selectAll)
+            KeyType.TOOL_SHARE->listener.onShare()
+            KeyType.TOOL_RESIZE->{resized=!resized;rowH=if(resized)62*d else 54*d;buildSlots();requestLayout();invalidate()}
+            KeyType.CHAR->{val value=if(layer==Layer.LETTERS&&shift!=Shift.OFF)k.label.uppercase() else k.label;if(shift==Shift.ON)shift=Shift.OFF;listener.onText(value);invalidate()}
+            KeyType.SPACE->listener.onText(" ")
+            KeyType.ENTER->listener.onEnter()
+            KeyType.SHIFT->{val now=SystemClock.uptimeMillis();shift=when{shift==Shift.CAPS->Shift.OFF;shift==Shift.ON&&now-lastShift<350->Shift.CAPS;shift==Shift.ON->Shift.OFF;else->Shift.ON};lastShift=now;invalidate()}
+            KeyType.MODE_SYM->{layer=Layer.SYMBOLS;buildSlots();invalidate()}
+            KeyType.MODE_ABC->{layer=Layer.LETTERS;buildSlots();invalidate()}
+            else->Unit
+        }
     }
-    private fun toolAt(x:Float,y:Float):Int{
-        val left=8*d;val gapX=8*d;val cw=(width-2*left-gapX)/2f;val ch=55*d
-        val col=((x-left)/(cw+gapX)).toInt();val row=((y-toolbarH-18*d)/(ch+10*d)).toInt()
-        return if(col in 0..1&&row in 0..2&&x>=left&&y>=toolbarH)row*2+col else -1
-    }
-    override fun onTouchEvent(e:MotionEvent):Boolean{
-        when(e.actionMasked){
-            MotionEvent.ACTION_DOWN->{
-                if(e.y<toolbarH){toolbarPressed=(e.x/(width/7f)).toInt().coerceIn(0,6);pressed=null}
-                else if(toolbox){toolPressed=toolAt(e.x,e.y);pressed=null}
-                else{pressed=hit(e.x,e.y);if(pressed!=null){performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);if(pressed!!.key.type==KeyType.DEL){listener.onDelete();handler.postDelayed(repeat,420)}else animatePopup(pressed!!)}}
-                invalidate();return true
-            }
-            MotionEvent.ACTION_MOVE->{if(!toolbox&&toolbarPressed<0){val next=hit(e.x,e.y);if(next!==pressed){handler.removeCallbacks(repeat);pressed=next;if(next!=null)animatePopup(next);invalidate()}}else if(toolbox){toolPressed=toolAt(e.x,e.y);invalidate()};return true}
-            MotionEvent.ACTION_UP->{
-                handler.removeCallbacks(repeat);val t=toolbarPressed;val tool=toolPressed;val key=pressed?.key
-                toolbarPressed=-1;toolPressed=-1;pressed=null;invalidate()
-                if(t>=0&&e.y<toolbarH){when(t){0->{toolbox=!toolbox;editingTools=false;requestLayout()};1->listener.onText("😊");2->listener.onClipboard();3->listener.onText("বাংলা");4->listener.onSettings();5->listener.onSettings();6->listener.onPicker()}}
-                else if(toolbox&&tool>=0)runTool(tool)
-                else if(key!=null&&key.type!=KeyType.DEL)fire(key)
-                return true
-            }
-            MotionEvent.ACTION_CANCEL->{handler.removeCallbacks(repeat);pressed=null;toolbarPressed=-1;toolPressed=-1;invalidate();return true}
-        };return true
-    }
-    private fun runTool(i:Int){
-        if(editingTools){when(i){0->listener.onSelectAll();1->listener.onCut();2->listener.onCopy();3->listener.onPaste();4->listener.onText("←");5->listener.onText("→")};return}
-        when(i){0->listener.onText("GIF ");1->listener.onText("😊");2->{oneHanded=!oneHanded;compact=oneHanded;invalidate()};3->{editingTools=true;invalidate()};4->listener.onShare();5->{compact=!compact;rowH=if(compact)60f*d else 52f*d;buildSlots();requestLayout()}}
-    }
-    override fun onDetachedFromWindow(){handler.removeCallbacks(repeat);popupAnimator?.cancel();super.onDetachedFromWindow()}
+    override fun onDetachedFromWindow(){prefs.unregisterOnSharedPreferenceChangeListener(this);handler.removeCallbacks(repeat);animator?.cancel();super.onDetachedFromWindow()}
 }
