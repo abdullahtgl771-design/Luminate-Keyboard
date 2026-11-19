@@ -33,7 +33,7 @@ class KeyboardView(context: Context, private val listener: Listener) : View(cont
     private data class Slot(val key: Key, val rect: RectF, val row: Int)
     private val d = resources.displayMetrics.density
     private val toolbarH = 48f*d
-    private val rowH = 52f*d
+    private var rowH = 52f*d
     private val gap = 4f*d
     private val pad = 4f*d
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -79,12 +79,13 @@ class KeyboardView(context: Context, private val listener: Listener) : View(cont
     private fun buildSlots(){
         val out=ArrayList<Slot>()
         val rows=Layouts.rows(layer)
-        val usable=(width-2*pad).coerceAtLeast(1f)
+        val usable=((width-2*pad)*(if(oneHanded)0.78f else 1f)).coerceAtLeast(1f)
+        val startX=if(oneHanded) width-usable-pad else pad
         rows.forEachIndexed { ri,row ->
             val total=row.sumOf{it.weight.toDouble()}.toFloat()
             val widthUnit=usable/total
             val top=toolbarH+pad+ri*rowH
-            var x=pad
+            var x=startX
             row.forEach { key ->
                 val kw=widthUnit*key.weight
                 if(key.type!=KeyType.SPACER) out.add(Slot(key,RectF(x+gap/2,top+gap/2,x+kw-gap/2,top+rowH-gap/2),ri))
@@ -208,7 +209,7 @@ class KeyboardView(context: Context, private val listener: Listener) : View(cont
     }
     private fun runTool(i:Int){
         if(editingTools){when(i){0->listener.onSelectAll();1->listener.onCut();2->listener.onCopy();3->listener.onPaste();4->listener.onText("←");5->listener.onText("→")};return}
-        when(i){0->listener.onText("GIF ");1->listener.onText("😊");2->{oneHanded=!oneHanded;compact=oneHanded;invalidate()};3->{editingTools=true;invalidate()};4->listener.onShare();5->{compact=!compact;requestLayout()}}
+        when(i){0->listener.onText("GIF ");1->listener.onText("😊");2->{oneHanded=!oneHanded;compact=oneHanded;invalidate()};3->{editingTools=true;invalidate()};4->listener.onShare();5->{compact=!compact;rowH=if(compact)60f*d else 52f*d;buildSlots();requestLayout()}}
     }
     override fun onDetachedFromWindow(){handler.removeCallbacks(repeat);popupAnimator?.cancel();super.onDetachedFromWindow()}
 }
