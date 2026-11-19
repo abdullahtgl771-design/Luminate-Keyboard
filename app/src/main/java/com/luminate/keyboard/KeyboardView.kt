@@ -65,7 +65,7 @@ class KeyboardView(context: Context, private val listener: Listener) : View(cont
     override fun onMeasure(w:Int,h:Int){val body=if(toolbox)3*rowH*1.5f else 4*rowH;setMeasuredDimension(MeasureSpec.getSize(w),(toolbarH+body+2*pad).toInt())}
     override fun onSizeChanged(w:Int,h:Int,ow:Int,oh:Int){buildSlots()}
     private fun buildSlots(){
-        val usable=(width-2*pad)*(if(oneHanded).78f else 1f)
+        val usable=(width-2*pad)*(if (oneHanded) 0.78f else 1f)
         val start=if(oneHanded)width-pad-usable else pad
         toolbar=listOf(KeyType.GRID_4,KeyType.STICKER,KeyType.CLIPBOARD,KeyType.TRANSLATE,KeyType.SETTINGS,KeyType.THEME,KeyType.VOICE).mapIndexed{i,t->
             val u=width/7f;Slot(Key("",t),RectF(i*u+gap/2,gap/2,(i+1)*u-gap/2,toolbarH-gap/2))
